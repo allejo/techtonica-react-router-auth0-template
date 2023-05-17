@@ -4,6 +4,7 @@ import { Alert } from "react-bootstrap";
 const Profile = () => {
     const { isAuthenticated, user } = useAuth0();
 
+    // If the user is not logged in, display a warning message.
     if (!isAuthenticated) {
         return (
             <div>
