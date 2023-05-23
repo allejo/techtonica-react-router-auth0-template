@@ -117,7 +117,7 @@ Alright, this is a two part debacle. First, we need to configure Auth0 in the Au
 2. Create a new application.
    ![](.github/assets/Auth0-Step-1.jpeg)
 3. Go to the "Settings" tab
-   1. Make a copy of `.env.example` and rename it to `.env`
+   1. Make a copy of `.env.example` and rename it to `.env` (if you are using this template)
    2. Copy the "Domain" and "Client ID" values and paste them into the respective environment variables in `.env`
       ![](.github/assets/Auth0-Step-2.jpeg)
    3. Make sure the "Application Type" is set to "Single Page Web Applications."
@@ -151,9 +151,10 @@ If your component needs to have any information about the user, you can use the 
 
 ```jsx
 const NavBar = () => {
-   const { isAuthenticated, loginWithRedirect, logout, user } = useAuth0();
+    // Load only whatever you need
+    const { isAuthenticated, loginWithRedirect, logout, user } = useAuth0();
 
-   // ...
+    // ...
 };
 ```
 
@@ -186,6 +187,105 @@ For another example using the `isAuthenticated` variable is the [`src/pages/Prof
 
 ## Making `fetch` requests to the backend
 
-When you're making `fetch` requests to the backend, ensure that you check `isAuthenticated` to be true and in the data that is being sent to the backend includes either `user.email` or `user.sub`. The `user.sub` is a unique identifier that Auth0 provides for each user. This is the preferred method of identifying a user since email addresses can change.
+Now that you've integrated auth0 into your React code, you have to make use of that user authentication when sending requests to the backend. For example, when you log in to your social media, you expect to see only posts from people you follow from your account. Your app needs to behave the same way, so how does the backend know what user you are logged in as?  Every time your frontend makes a `fetch` request, it must also include what user is logged in so that you show the correct information tied to that user.
 
-// There is more for me to write here but I'm getting tired tonight. I'll come back to it later.
+How does this work in practice? If you inspect the `user` object from the `useAuth0()` hook, you'll notice that there's a `user.sub` field that looks something like `google-oauth2|117686103243408785895170`. You want to send this information to the backend **every** time you make a fetch request that requires user information.
+
+> **Note:** This is **NOT** a secure approach and should never be used in a production application. But for the sake of learning, we'll be accepting that security risk for our projects.
+
+When you make a `fetch` request, it looks approximately one of two ways:
+
+```js
+// 1. Sending a GET request
+fetch('/api/my-feed')
+    .then(response => response.json())
+    .then(data => setFeed(data))
+
+// 2. Sending a POST request
+fetch('/api/my-feed', { 
+    method: 'POST',
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(postData),
+})
+    .then(response => response.json())
+    .then(data => setFeed(data))
+```
+
+You will need to modify your `fetch` requests to include the information from `user.sub` so that your backend knows which user is making the request. In GET/DELETE requests, you will need to send this information as a query parameter (i.e. the stuff that shows up after the `?` in a URL) and as part of the body in POST/PUT requests (i.e. whatever you are `JSON.stringify`-ing).
+
+Your `fetch` requests will end up looking similar to this,
+
+```js
+// 1. Sending a GET request
+fetch(`/api/my-feed?user_sub=${user.sub}`)
+    .then(response => response.json())
+    .then(data => setFeed(data))
+
+// 2. Sending a POST request
+fetch('/api/my-feed', { 
+    method: 'POST',
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+       // Send all of the original POST data
+       ...postData,
+       // But also append the user information
+       user_sub: user.sub,
+    }),
+})
+    .then(response => response.json())
+    .then(data => setFeed(data))
+```
+
+## Handling `fetch` requests in the backend
+
+Alright, now that you're sending user information from the frontend to the backend, your backend needs to know what to do with that information.
+
+Let's work under the assumption that your database has a table that looks like this,
+
+| id | name | email | auth0_sub                               |
+| -- | ---- | ----- |-----------------------------------------|
+| 1 | allejo | me@allejo.io | google-oauth2\|117686103243408785895170 |
+
+And let's work off the assumption that you have a basic route that looks something like,
+
+```js
+app.get('/api/my-feed', async (res, req) => {
+    try {
+        const feed = await db.query("SELECT * FROM feed");
+        res.json(feed.rows);
+    } catch (e) {
+        res.status(400).json({ message: e.message })
+    }
+});
+```
+
+You will need to modify your routes to take the user sub and look up the corresponding user ID from your database. Since we will be doing this a lot, let's write a function to perform this action for us:
+
+```js
+// You WILL need to adapt this function for your use and your database structure
+async function getUserIdFromSub(userSub) {
+    const user = await db.query(
+        'SELECT id FROM users WHERE auth0_sub = $1',
+         [userSub]
+    );
+    
+    return user.id;
+}
+```
+
+Now, let's modify our route to make use of this new functionality. We'll call our new function which will query the database to find the corresponding user ID for our user and use that ID to filter our query results.
+
+```js
+app.get('/api/my-feed', async (req, res) => {
+    try {
+        const userId = await getUserIdFromSub(req.query.user_sub); // OR `req.body.user_sub` if a POST request
+        const feed = await db.query(
+            "SELECT * FROM feed WHERE user_id = $1",
+             [userId]
+        );
+        res.json(feed.rows);
+    } catch (e) {
+        res.status(400).json({ message: e.message })
+    }
+});
+```
